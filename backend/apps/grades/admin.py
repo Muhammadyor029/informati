@@ -1,0 +1,8 @@
+from django.contrib import admin
+from .models import Grade
+
+
+@admin.register(Grade)
+class GradeAdmin(admin.ModelAdmin):
+    list_display = ("grade", "title", "weekly_hours", "total_hours")
+    ordering = ("grade",)

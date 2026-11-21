@@ -1,0 +1,6 @@
+{
+  "name": "NOVA AGENT — Thinking Machines",
+  "description": "The home for on-chain AI agents. Your personal expert in all crypto & blockchain related topics.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
