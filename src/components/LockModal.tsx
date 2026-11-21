@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Loader2, Lock, ShieldCheck, X } from 'lucide-react';
-import { api, ApiError } from '../lib/api';
+import { Bell, Clock, Loader2, Lock, LogIn, ShieldCheck, X } from 'lucide-react';
+import { api, ApiError, PermissionStatus } from '../lib/api';
 import { SparkleButton } from './SparkleButton';
 
 interface LockModalProps {
@@ -8,6 +8,13 @@ interface LockModalProps {
   onClose: () => void;
   onUnlockSuccess: () => void;
   targetTitle?: string;
+  topicSlug?: string | null;
+  permissionStatus?: PermissionStatus | null;
+  isLoggedIn?: boolean;
+  requesting?: boolean;
+  permissionError?: string | null;
+  onRequestPermission?: (topicSlug: string) => void;
+  onRequireLogin?: () => void;
 }
 
 export const LockModal: React.FC<LockModalProps> = ({
@@ -15,6 +22,13 @@ export const LockModal: React.FC<LockModalProps> = ({
   onClose,
   onUnlockSuccess,
   targetTitle,
+  topicSlug,
+  permissionStatus,
+  isLoggedIn = false,
+  requesting = false,
+  permissionError,
+  onRequestPermission,
+  onRequireLogin,
 }) => {
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
@@ -89,8 +103,66 @@ export const LockModal: React.FC<LockModalProps> = ({
             {targetTitle ? `“${targetTitle}” bo‘limini ochish` : 'Barcha mavzu va o‘yinlarni ochish'}
           </h3>
           <p className="mt-1.5 text-sm leading-relaxed text-[var(--dim)]">
-            Ushbu o‘quv mavzulari, taqdimotlar, amaliy mashg‘ulotlar, testlar va o‘yinlar server tomondan himoyalangan. Davom etish uchun ruxsat kodini kiriting.
+            Ushbu o‘quv mavzulari, taqdimotlar, amaliy mashg‘ulotlar, testlar va o‘yinlar server tomondan himoyalangan. Davom etish uchun domladan ruxsat so‘rang yoki ruxsat kodini kiriting.
           </p>
+
+          {topicSlug && (
+            <div className="mt-4 rounded-xl border border-[#2563eb]/30 bg-[#2563eb]/5 p-3.5">
+              <div className="flex items-start gap-2.5">
+                {permissionStatus === 'pending' ? (
+                  <Clock className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                ) : (
+                  <Bell className="mt-0.5 h-4 w-4 shrink-0 text-[#2563eb]" />
+                )}
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">
+                    {permissionStatus === 'pending'
+                      ? 'Ruxsat so‘rovi yuborildi'
+                      : 'Domladan ruxsat so‘rang'}
+                  </p>
+                  <p className="mt-0.5 text-xs leading-relaxed text-[var(--dim)]">
+                    {permissionStatus === 'pending'
+                      ? 'Ustoz panelida so‘rovingiz ko‘rinadi. Tasdiqlangach faqat shu mavzu ochiladi.'
+                      : 'So‘rov ustozga bildirishnoma sifatida tushadi va faqat shu mavzuga ruxsat beriladi.'}
+                  </p>
+                </div>
+              </div>
+              {permissionStatus !== 'pending' && (
+                <SparkleButton
+                  type="button"
+                  variant="primary"
+                  size="sm"
+                  fullWidth
+                  showSparkle={!requesting}
+                  withParticles={false}
+                  disabled={requesting}
+                  onClick={() => {
+                    if (!isLoggedIn) onRequireLogin?.();
+                    else if (onRequestPermission) onRequestPermission(topicSlug);
+                  }}
+                  className="mt-3"
+                >
+                  {requesting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : !isLoggedIn ? (
+                    <LogIn className="h-3.5 w-3.5" />
+                  ) : (
+                    <Bell className="h-3.5 w-3.5" />
+                  )}
+                  <span className="uppercase tracking-wider">
+                    {requesting
+                      ? 'Yuborilmoqda...'
+                      : !isLoggedIn
+                      ? 'Avval ro‘yxatdan o‘tish'
+                      : 'Ruxsat so‘rash'}
+                  </span>
+                </SparkleButton>
+              )}
+              {permissionError && (
+                <p className="mt-2 font-mono-tech text-xs text-rose-500">{permissionError}</p>
+              )}
+            </div>
+          )}
 
           <div className="mt-4">
             <label

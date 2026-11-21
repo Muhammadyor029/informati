@@ -45,6 +45,8 @@ export interface ApiLessonSummary {
   game_ids: number[];
   test_count?: number;
   practice_count?: number;
+  locked?: boolean;
+  permission_status?: PermissionStatus | null;
 }
 
 export interface ApiVisualDiagram {
@@ -95,6 +97,36 @@ export interface ApiTopicSummary {
   lesson_count: number;
   test_count?: number;
   practice_count?: number;
+  locked?: boolean;
+  permission_status?: PermissionStatus | null;
+}
+
+export type PermissionStatus = 'pending' | 'approved';
+
+export interface ApiTopicPermission {
+  id: number;
+  user_id: number;
+  username: string;
+  full_name: string;
+  grade_num: number;
+  topic_slug: string;
+  topic_title: string;
+  status: PermissionStatus;
+  created_at: string;
+  updated_at: string;
+  reviewed_by: string | null;
+}
+
+export interface ApiRegisteredUser {
+  id: number;
+  username: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  role: 'student' | 'teacher' | 'admin';
+  grade_level: number;
+  curriculum_unlocked: boolean;
+  approved_topics: number;
 }
 
 export interface ApiLessonRow {
@@ -307,7 +339,12 @@ export function mapApiGameToDef(g: RawApiGame): GameDef {
 }
 
 export const api = {
-  getMe: () => requestJson<{ user: ApiUser | null; curriculum_unlocked: boolean }>('/auth/me'),
+  getMe: () =>
+    requestJson<{
+      user: ApiUser | null;
+      curriculum_unlocked: boolean;
+      topic_permissions: Array<{ topic_slug: string; status: PermissionStatus; created_at: string }>;
+    }>('/auth/me'),
 
   register: (payload: {
     username: string;
@@ -343,6 +380,27 @@ export const api = {
     requestJson<{ unlocked: boolean }>('/auth/lock-curriculum', {
       method: 'POST',
     }),
+
+  requestTopicPermission: (topicSlug: string) =>
+    requestJson<ApiTopicPermission & { already_exists?: boolean }>(
+      `/topics/${encodeURIComponent(topicSlug)}/permission-request`,
+      { method: 'POST' }
+    ),
+
+  getMyTopicPermissions: () => requestJson<ApiTopicPermission[]>('/permissions/me'),
+
+  getTopicPermissionRequests: () =>
+    requestJson<{
+      records: ApiTopicPermission[];
+      pending_count: number;
+      total_count: number;
+    }>('/permissions/requests'),
+
+  approveTopicPermission: (id: number) =>
+    requestJson<ApiTopicPermission>(`/permissions/${id}/approve`, { method: 'POST' }),
+
+  getRegisteredUsers: () =>
+    requestJson<{ users: ApiRegisteredUser[]; total: number }>('/users'),
 
   getGrades: () => requestJson<ApiGrade[]>('/grades'),
 

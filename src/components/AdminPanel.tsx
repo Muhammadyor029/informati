@@ -1,6 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Bell,
   BookOpen,
+  CheckCircle2,
+  Clock,
   Image as ImageIcon,
   Loader2,
   LogIn,
@@ -17,7 +20,9 @@ import {
   ApiError,
   ApiGrade,
   ApiMediaAsset,
+  ApiRegisteredUser,
   ApiSlide,
+  ApiTopicPermission,
   ApiTopicProgress,
   ApiTopicSummary,
   ApiUser,
@@ -32,7 +37,7 @@ interface AdminPanelProps {
   onDataUpdated: () => void;
 }
 
-type AdminTab = 'topics' | 'slides' | 'media' | 'students';
+type AdminTab = 'topics' | 'slides' | 'media' | 'requests' | 'users' | 'students';
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
   user,
@@ -76,6 +81,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [overviewMeta, setOverviewMeta] = useState({ total_students: 0, total_attempts: 0 });
   const [loadingStudents, setLoadingStudents] = useState(false);
 
+  const [permissionRequests, setPermissionRequests] = useState<ApiTopicPermission[]>([]);
+  const [permissionTotal, setPermissionTotal] = useState(0);
+  const [loadingPermissions, setLoadingPermissions] = useState(false);
+  const [approvingId, setApprovingId] = useState<number | null>(null);
+
+  const [registeredUsers, setRegisteredUsers] = useState<ApiRegisteredUser[]>([]);
+  const [registeredTotal, setRegisteredTotal] = useState(0);
+  const [loadingRegisteredUsers, setLoadingRegisteredUsers] = useState(false);
+
   useEffect(() => {
     if (!selectedSlug && topics.length > 0) {
       setSelectedSlug(topics[0].slug);
@@ -114,6 +128,36 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       })
       .catch((err) => setErrMsg(err instanceof ApiError ? err.message : 'Xatolik.'))
       .finally(() => setLoadingStudents(false));
+  }, [isEducator, tab]);
+
+  useEffect(() => {
+    if (!isEducator) return;
+    setLoadingPermissions(tab === 'requests');
+    api
+      .getTopicPermissionRequests()
+      .then((res) => {
+        setPermissionRequests(res.records);
+        setPermissionTotal(res.total_count);
+      })
+      .catch((err) => {
+        if (tab === 'requests') {
+          setErrMsg(err instanceof ApiError ? err.message : 'So‘rovlarni yuklashda xatolik.');
+        }
+      })
+      .finally(() => setLoadingPermissions(false));
+  }, [isEducator, tab]);
+
+  useEffect(() => {
+    if (!isEducator || tab !== 'users') return;
+    setLoadingRegisteredUsers(true);
+    api
+      .getRegisteredUsers()
+      .then((res) => {
+        setRegisteredUsers(res.users);
+        setRegisteredTotal(res.total);
+      })
+      .catch((err) => setErrMsg(err instanceof ApiError ? err.message : 'Foydalanuvchilarni yuklashda xatolik.'))
+      .finally(() => setLoadingRegisteredUsers(false));
   }, [isEducator, tab]);
 
   if (!isEducator) {
@@ -230,11 +274,35 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
+  const handleApprovePermission = async (id: number) => {
+    setApprovingId(id);
+    setErrMsg(null);
+    setStatusMsg(null);
+    try {
+      const updated = await api.approveTopicPermission(id);
+      setPermissionRequests((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      setStatusMsg(`${updated.username} uchun “${updated.topic_title}” mavzusi ochildi.`);
+      onDataUpdated();
+    } catch (err) {
+      setErrMsg(err instanceof ApiError ? err.message : 'Tasdiqlashda xatolik.');
+    } finally {
+      setApprovingId(null);
+    }
+  };
+
+  const pendingPermissionCount = permissionRequests.filter((r) => r.status === 'pending').length;
+
   const tabs: Array<{ id: AdminTab; label: string; icon: React.ReactNode }> = [
     { id: 'topics', label: 'Sinf va Mavzular', icon: <BookOpen className="h-3.5 w-3.5" /> },
     { id: 'slides', label: 'Taqdimot Slaydlari', icon: <Presentation className="h-3.5 w-3.5" /> },
     { id: 'media', label: 'Original Rasmlar', icon: <ImageIcon className="h-3.5 w-3.5" /> },
-    { id: 'students', label: 'O‘quvchi Natijalari', icon: <Users className="h-3.5 w-3.5" /> },
+    {
+      id: 'requests',
+      label: `Ruxsat so‘rovlari${pendingPermissionCount ? ` · ${pendingPermissionCount}` : ''}`,
+      icon: <Bell className="h-3.5 w-3.5" />,
+    },
+    { id: 'users', label: 'Foydalanuvchilar', icon: <Users className="h-3.5 w-3.5" /> },
+    { id: 'students', label: 'O‘quvchi Natijalari', icon: <CheckCircle2 className="h-3.5 w-3.5" /> },
   ];
 
   return (
@@ -651,6 +719,168 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'requests' && (
+        <div className="rounded-2xl border border-[var(--grid)] bg-[var(--surface)] p-5">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="font-mono-tech text-xs uppercase text-[var(--dim)]">
+              Kutilayotgan: {pendingPermissionCount} · Jami so‘rovlar: {permissionTotal}
+            </div>
+            <SparkleButton
+              variant="secondary"
+              size="xs"
+              withParticles={false}
+              onClick={() => {
+                setLoadingPermissions(true);
+                api
+                  .getTopicPermissionRequests()
+                  .then((res) => {
+                    setPermissionRequests(res.records);
+                    setPermissionTotal(res.total_count);
+                  })
+                  .catch((err) =>
+                    setErrMsg(err instanceof ApiError ? err.message : 'Yangilashda xatolik.')
+                  )
+                  .finally(() => setLoadingPermissions(false));
+              }}
+            >
+              Yangilash
+            </SparkleButton>
+          </div>
+
+          {loadingPermissions ? (
+            <div className="flex items-center gap-2 py-8 text-sm text-[var(--dim)]">
+              <Loader2 className="h-4 w-4 animate-spin" /> Yuklanmoqda...
+            </div>
+          ) : permissionRequests.length === 0 ? (
+            <div className="rounded-xl border border-[var(--grid)] bg-[var(--bg)] p-8 text-center text-sm text-[var(--dim)]">
+              Hali ruxsat so‘rovi yo‘q.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-[var(--grid)]">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-[var(--bg)] font-mono-tech text-[11px] uppercase text-[var(--dim)]">
+                  <tr>
+                    <th className="px-4 py-2.5">O‘quvchi</th>
+                    <th className="px-4 py-2.5">Mavzu</th>
+                    <th className="px-4 py-2.5">Vaqt</th>
+                    <th className="px-4 py-2.5">Holat</th>
+                    <th className="px-4 py-2.5">Amal</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {permissionRequests.map((r) => (
+                    <tr key={r.id} className="border-t border-[var(--grid)]">
+                      <td className="px-4 py-2.5">
+                        <div className="font-medium">{r.full_name || r.username}</div>
+                        <div className="font-mono-tech text-[11px] text-[var(--dim)]">
+                          @{r.username} · {r.grade_num}-sinf
+                        </div>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div>{r.topic_title}</div>
+                        <div className="font-mono-tech text-[11px] text-[var(--dim)]">
+                          {r.topic_slug}
+                        </div>
+                      </td>
+                      <td className="px-4 py-2.5 font-mono-tech text-[11px] text-[var(--dim)]">
+                        {new Date(r.created_at).toLocaleString('uz-UZ')}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        {r.status === 'pending' ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-500/15 px-2 py-1 font-mono-tech text-[11px] uppercase text-amber-500">
+                            <Clock className="h-3 w-3" /> Kutilmoqda
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500/15 px-2 py-1 font-mono-tech text-[11px] uppercase text-emerald-500">
+                            <CheckCircle2 className="h-3 w-3" /> Tasdiqlangan
+                            {r.reviewed_by ? ` · ${r.reviewed_by}` : ''}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        {r.status === 'pending' ? (
+                          <SparkleButton
+                            variant="emerald"
+                            size="xs"
+                            showSparkle
+                            withParticles={false}
+                            disabled={approvingId === r.id}
+                            onClick={() => handleApprovePermission(r.id)}
+                          >
+                            {approvingId === r.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            )}
+                            <span className="uppercase">Tasdiqlash</span>
+                          </SparkleButton>
+                        ) : (
+                          <span className="font-mono-tech text-[11px] text-[var(--dim)]">
+                            {new Date(r.updated_at).toLocaleString('uz-UZ')}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'users' && (
+        <div className="rounded-2xl border border-[var(--grid)] bg-[var(--surface)] p-5">
+          <div className="mb-4 font-mono-tech text-xs uppercase text-[var(--dim)]">
+            Jami ro‘yxatdan o‘tganlar: {registeredTotal}
+          </div>
+          {loadingRegisteredUsers ? (
+            <div className="flex items-center gap-2 py-8 text-sm text-[var(--dim)]">
+              <Loader2 className="h-4 w-4 animate-spin" /> Yuklanmoqda...
+            </div>
+          ) : registeredUsers.length === 0 ? (
+            <div className="rounded-xl border border-[var(--grid)] bg-[var(--bg)] p-8 text-center text-sm text-[var(--dim)]">
+              Hali foydalanuvchilar yo‘q.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-[var(--grid)]">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-[var(--bg)] font-mono-tech text-[11px] uppercase text-[var(--dim)]">
+                  <tr>
+                    <th className="px-4 py-2.5">Foydalanuvchi</th>
+                    <th className="px-4 py-2.5">Email</th>
+                    <th className="px-4 py-2.5">Sinf</th>
+                    <th className="px-4 py-2.5">Rol</th>
+                    <th className="px-4 py-2.5">Ochilgan mavzular</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {registeredUsers.map((u) => (
+                    <tr key={u.id} className="border-t border-[var(--grid)]">
+                      <td className="px-4 py-2.5">
+                        <div className="font-medium">
+                          {[u.first_name, u.last_name].filter(Boolean).join(' ') || u.username}
+                        </div>
+                        <div className="font-mono-tech text-[11px] text-[var(--dim)]">@{u.username}</div>
+                      </td>
+                      <td className="px-4 py-2.5 font-mono-tech text-[11px] text-[var(--dim)]">
+                        {u.email || '—'}
+                      </td>
+                      <td className="px-4 py-2.5">{u.grade_level}-sinf</td>
+                      <td className="px-4 py-2.5 font-mono-tech text-[11px] uppercase">
+                        {u.role}
+                        {u.curriculum_unlocked ? ' · ochilgan' : ''}
+                      </td>
+                      <td className="px-4 py-2.5 font-mono-tech text-xs">{u.approved_topics} ta</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>

@@ -205,6 +205,16 @@ interface StoredProgress {
   updated_at: string;
 }
 
+interface StoredTopicPermission {
+  id: number;
+  user_id: number;
+  topic_slug: string;
+  status: 'pending' | 'approved';
+  created_at: string;
+  updated_at: string;
+  reviewed_by: string | null;
+}
+
 interface StoredGameScore {
   id: number;
   user_id: number;
@@ -250,6 +260,7 @@ interface DatabaseSchema {
   games: StoredGame[];
   media: StoredMediaAsset[];
   progress: StoredProgress[];
+  topicPermissions: StoredTopicPermission[];
   gameScores: StoredGameScore[];
   testAttempts: StoredAttempt[];
 }
@@ -765,6 +776,7 @@ function buildInitialDb(): DatabaseSchema {
       media: 1,
       game: games.length + 1,
       progress: 1,
+      topicPermission: 1,
       gameScore: 1,
       attempt: 1,
     },
@@ -780,6 +792,7 @@ function buildInitialDb(): DatabaseSchema {
     games,
     media: [],
     progress: [],
+    topicPermissions: [],
     gameScores: [],
     testAttempts: [],
   };
@@ -799,11 +812,13 @@ function loadDatabase(): DatabaseSchema {
         fresh.tokens = parsed.tokens || {};
         fresh.media = parsed.media || [];
         fresh.progress = parsed.progress || [];
+        fresh.topicPermissions = parsed.topicPermissions || [];
         fresh.gameScores = parsed.gameScores || [];
         fresh.testAttempts = parsed.testAttempts || [];
         fresh.nextIds.user = Math.max(fresh.nextIds.user || 1, parsed.nextIds?.user || 1);
         fresh.nextIds.media = Math.max(fresh.nextIds.media || 1, parsed.nextIds?.media || 1);
         fresh.nextIds.progress = Math.max(fresh.nextIds.progress || 1, parsed.nextIds?.progress || 1);
+        fresh.nextIds.topicPermission = Math.max(fresh.nextIds.topicPermission || 1, parsed.nextIds?.topicPermission || 1);
         fresh.nextIds.gameScore = Math.max(fresh.nextIds.gameScore || 1, parsed.nextIds?.gameScore || 1);
         fresh.nextIds.attempt = Math.max(fresh.nextIds.attempt || 1, parsed.nextIds?.attempt || 1);
         db = fresh;
@@ -815,6 +830,14 @@ function loadDatabase(): DatabaseSchema {
     }
   } else {
     db = buildInitialDb();
+  }
+
+  if (!Array.isArray(db.topicPermissions)) db.topicPermissions = [];
+  if (!db.nextIds.topicPermission) {
+    db.nextIds.topicPermission = db.topicPermissions.reduce(
+      (max, p) => Math.max(max, Number(p.id) + 1),
+      1
+    );
   }
 
   // Optional educator account bootstrap strictly via server environment variables
@@ -832,6 +855,23 @@ function loadDatabase(): DatabaseSchema {
       grade_level: 7,
       curriculum_unlocked: true,
       password_hash: hashPassword(adminPass),
+      created_at: new Date().toISOString(),
+    });
+  }
+
+  const teacherUsername = (process.env.TEACHER_USERNAME || 'SamandarTurdaliyev').trim();
+  const teacherPassword = process.env.TEACHER_PASSWORD || 'Samandar123';
+  if (teacherUsername && teacherPassword && !db.users.some((u) => u.username === teacherUsername)) {
+    db.users.push({
+      id: db.nextIds.user++,
+      username: teacherUsername,
+      email: `${teacherUsername}@novainformatika.uz`,
+      first_name: 'Samandar',
+      last_name: 'Turdaliyev',
+      role: 'teacher',
+      grade_level: 7,
+      curriculum_unlocked: true,
+      password_hash: hashPassword(teacherPassword),
       created_at: new Date().toISOString(),
     });
   }
@@ -890,6 +930,45 @@ function serializeSlide(slide: StoredSlide, db: DatabaseSchema) {
 
 function isEducator(user?: StoredUser | null): boolean {
   return Boolean(user && (user.role === 'teacher' || user.role === 'admin'));
+}
+
+function topicPermissionStatus(
+  db: DatabaseSchema,
+  user: StoredUser | null | undefined,
+  topicSlug: string
+): 'pending' | 'approved' | null {
+  if (!user) return null;
+  const records = db.topicPermissions.filter(
+    (p) => p.user_id === user.id && p.topic_slug === topicSlug
+  );
+  if (records.some((p) => p.status === 'approved')) return 'approved';
+  return records.some((p) => p.status === 'pending') ? 'pending' : null;
+}
+
+function canAccessTopic(db: DatabaseSchema, req: Request, topicSlug: string): boolean {
+  const user = (req as AuthedRequest).currentUser;
+  if (isEducator(user) || user?.curriculum_unlocked) return true;
+  const cookies = parseCookies(req.headers.cookie);
+  if (verifySignedPayload(cookies[UNLOCK_COOKIE] || '') === 'unlocked') return true;
+  return topicPermissionStatus(db, user, topicSlug) === 'approved';
+}
+
+function serializeTopicPermission(db: DatabaseSchema, p: StoredTopicPermission) {
+  const topic = db.topics.find((t) => t.slug === p.topic_slug);
+  const user = db.users.find((u) => u.id === p.user_id);
+  return {
+    id: p.id,
+    user_id: p.user_id,
+    username: user?.username || 'noma’lum',
+    full_name: user ? `${user.first_name} ${user.last_name}`.trim() : '',
+    grade_num: user?.grade_level || topic?.grade_num || 5,
+    topic_slug: p.topic_slug,
+    topic_title: topic?.title || p.topic_slug,
+    status: p.status,
+    created_at: p.created_at,
+    updated_at: p.updated_at,
+    reviewed_by: p.reviewed_by,
+  };
 }
 
 function parseBearerOrCookieToken(req: Request): string | null {
@@ -1077,12 +1156,16 @@ async function startServer() {
     const cookies = parseCookies(req.headers.cookie);
     const cookieUnlocked = verifySignedPayload(cookies[UNLOCK_COOKIE] || '') === 'unlocked';
     if (!req.currentUser) {
-      res.json({ user: null, curriculum_unlocked: cookieUnlocked });
+      res.json({ user: null, curriculum_unlocked: cookieUnlocked, topic_permissions: [] });
       return;
     }
+    const topicPermissions = db.topicPermissions
+      .filter((p) => p.user_id === req.currentUser!.id)
+      .map((p) => ({ topic_slug: p.topic_slug, status: p.status, created_at: p.created_at }));
     res.json({
       user: sanitizeUser(req.currentUser),
       curriculum_unlocked: Boolean(req.currentUser.curriculum_unlocked || cookieUnlocked),
+      topic_permissions: topicPermissions,
     });
   });
 
@@ -1170,7 +1253,7 @@ async function startServer() {
   });
 
   // ==================== INDIVIDUAL LESSONS (340 LESSONS) ====================
-  app.get('/api/v1/lessons', (req: Request, res: Response) => {
+  app.get('/api/v1/lessons', (req: AuthedRequest, res: Response) => {
     const gradeFilter = req.query.grade ? Number(req.query.grade) : null;
     const topicFilter = req.query.topic ? String(req.query.topic).trim() : null;
     const typeFilter = req.query.type ? String(req.query.type).trim() : null;
@@ -1181,40 +1264,50 @@ async function startServer() {
         if (gradeFilter && l.grade_num !== gradeFilter) return false;
         if (topicFilter && l.topic_slug !== topicFilter) return false;
         if (typeFilter && typeFilter !== 'all' && l.lesson_type !== typeFilter) return false;
-        if (
-          searchFilter &&
-          !`${l.dars} ${l.title} ${l.term} ${l.topic_title}`.toLowerCase().includes(searchFilter)
-        ) {
-          return false;
+        if (searchFilter) {
+          const allowed = canAccessTopic(db, req, l.topic_slug);
+          const text = allowed
+            ? `${l.dars} ${l.title} ${l.term} ${l.topic_title}`
+            : `${l.dars} Qulflangan dars`;
+          if (!text.toLowerCase().includes(searchFilter)) return false;
         }
         return true;
       })
       .sort((a, b) => (a.grade_num !== b.grade_num ? a.grade_num - b.grade_num : a.lesson_number - b.lesson_number))
-      .map((l) => ({
-        id: l.id,
-        slug: l.slug,
-        grade_num: l.grade_num,
-        topic_slug: l.topic_slug,
-        topic_title: l.topic_title,
-        lesson_number: l.lesson_number,
-        order: l.order,
-        dars: l.dars,
-        title: l.title,
-        term: l.term,
-        lesson_type: l.lesson_type,
-        hours: l.hours,
-        note: l.note,
-        game_ids: l.game_ids,
-        test_count: db.tests.filter((q) => q.lesson_slug === l.slug).length,
-        practice_count: l.practices.length,
-      }));
+      .map((l) => {
+        const allowed = canAccessTopic(db, req, l.topic_slug);
+        return {
+          id: l.id,
+          slug: l.slug,
+          grade_num: l.grade_num,
+          topic_slug: l.topic_slug,
+          topic_title: allowed ? l.topic_title : `${l.grade_num}-sinf`,
+          lesson_number: l.lesson_number,
+          order: l.order,
+          dars: l.dars,
+          title: allowed ? l.title : `${l.dars} · Qulflangan dars`,
+          term: allowed ? l.term : '',
+          lesson_type: l.lesson_type,
+          hours: l.hours,
+          note: allowed ? l.note : '',
+          game_ids: l.game_ids,
+          test_count: db.tests.filter((q) => q.lesson_slug === l.slug).length,
+          practice_count: l.practices.length,
+          locked: !allowed,
+          permission_status: topicPermissionStatus(db, req.currentUser, l.topic_slug),
+        };
+      });
     res.json(list);
   });
 
-  app.get('/api/v1/lessons/:slug', (req: Request, res: Response) => {
+  app.get('/api/v1/lessons/:slug', (req: AuthedRequest, res: Response) => {
     const lesson = db.lessons.find((l) => l.slug === req.params.slug);
     if (!lesson) {
       res.status(404).json({ detail: 'Dars topilmadi.' });
+      return;
+    }
+    if (!canAccessTopic(db, req, lesson.topic_slug)) {
+      res.status(403).json({ detail: 'Bu darsni ochish uchun mavzu ruxsati kerak.' });
       return;
     }
     const gradeLessons = db.lessons
@@ -1248,27 +1341,32 @@ async function startServer() {
   });
 
   // ==================== TOPICS & LESSONS ====================
-  app.get('/api/v1/topics', (req: Request, res: Response) => {
+  app.get('/api/v1/topics', (req: AuthedRequest, res: Response) => {
     const gradeFilter = req.query.grade ? Number(req.query.grade) : null;
     const filtered = db.topics
       .filter((t) => (gradeFilter ? t.grade_num === gradeFilter : true))
       .sort((a, b) => (a.grade_num !== b.grade_num ? a.grade_num - b.grade_num : a.order - b.order))
-      .map((t) => ({
-        id: t.id,
-        slug: t.slug,
-        grade_num: t.grade_num,
-        order: t.order,
-        term: t.term,
-        lesson_range: t.lesson_range,
-        total_hours: t.total_hours,
-        title: t.title,
-        short_desc: t.short_desc,
-        anim_type: t.anim_type,
-        game_ids: t.game_ids,
-        lesson_count: t.lessons.length,
-        test_count: db.tests.filter((q) => q.topic_slug === t.slug && !q.lesson_slug).length,
-        practice_count: t.practices.length,
-      }));
+      .map((t) => {
+        const allowed = canAccessTopic(db, req, t.slug);
+        return {
+          id: t.id,
+          slug: t.slug,
+          grade_num: t.grade_num,
+          order: t.order,
+          term: t.term,
+          lesson_range: t.lesson_range,
+          total_hours: t.total_hours,
+          title: allowed ? t.title : `${t.grade_num}-sinf · ${t.order}-bo‘lim (Qulflangan)`,
+          short_desc: allowed ? t.short_desc : 'Ruxsat olish uchun so‘rov yuboring.',
+          anim_type: t.anim_type,
+          game_ids: t.game_ids,
+          lesson_count: t.lessons.length,
+          test_count: db.tests.filter((q) => q.topic_slug === t.slug && !q.lesson_slug).length,
+          practice_count: t.practices.length,
+          locked: !allowed,
+          permission_status: topicPermissionStatus(db, req.currentUser, t.slug),
+        };
+      });
     res.json(filtered);
   });
 
@@ -1299,6 +1397,11 @@ async function startServer() {
     }
     if ((!foundTopic && !foundLesson) || !foundTask) {
       res.status(404).json({ detail: 'Amaliy topshiriq topilmadi.' });
+      return;
+    }
+    const practiceTopicSlug = foundLesson?.topic_slug || foundTopic?.slug || '';
+    if (!canAccessTopic(db, req, practiceTopicSlug)) {
+      res.status(403).json({ detail: 'Bu amaliyot uchun mavzu ruxsati kerak.' });
       return;
     }
     if (!answer) {
@@ -1344,10 +1447,14 @@ async function startServer() {
     res.json({ correct: matched, practice_code: code });
   });
 
-  app.get('/api/v1/topics/:slug', (req: Request, res: Response) => {
+  app.get('/api/v1/topics/:slug', (req: AuthedRequest, res: Response) => {
     const topic = db.topics.find((t) => t.slug === req.params.slug);
     if (!topic) {
       res.status(404).json({ detail: 'Bo‘lim topilmadi.' });
+      return;
+    }
+    if (!canAccessTopic(db, req, topic.slug)) {
+      res.status(403).json({ detail: 'Bu mavzuni ochish uchun ruxsat oling.' });
       return;
     }
     const childLessons = db.lessons
@@ -1493,13 +1600,95 @@ async function startServer() {
     res.json(topic);
   });
 
+  // ==================== TOPIC PERMISSION REQUESTS ====================
+  app.post('/api/v1/topics/:slug/permission-request', requireAuth, (req: AuthedRequest, res: Response) => {
+    const topic = db.topics.find((t) => t.slug === req.params.slug);
+    if (!topic) {
+      res.status(404).json({ detail: 'Bo‘lim topilmadi.' });
+      return;
+    }
+    const user = req.currentUser!;
+    const existing = db.topicPermissions.find(
+      (p) => p.user_id === user.id && p.topic_slug === topic.slug
+    );
+    if (existing) {
+      res.json({ ...serializeTopicPermission(db, existing), already_exists: true });
+      return;
+    }
+    const now = new Date().toISOString();
+    const record: StoredTopicPermission = {
+      id: nextId(db, 'topicPermission'),
+      user_id: user.id,
+      topic_slug: topic.slug,
+      status: 'pending',
+      created_at: now,
+      updated_at: now,
+      reviewed_by: null,
+    };
+    db.topicPermissions.push(record);
+    saveDatabase(db);
+    res.status(201).json({ ...serializeTopicPermission(db, record), already_exists: false });
+  });
+
+  app.get('/api/v1/permissions/me', requireAuth, (req: AuthedRequest, res: Response) => {
+    const list = db.topicPermissions
+      .filter((p) => p.user_id === req.currentUser!.id)
+      .map((p) => serializeTopicPermission(db, p));
+    res.json(list);
+  });
+
+  app.get('/api/v1/permissions/requests', requireEducator, (_req: AuthedRequest, res: Response) => {
+    const records = [...db.topicPermissions]
+      .sort((a, b) => {
+        if (a.status !== b.status) return a.status === 'pending' ? -1 : 1;
+        return b.created_at.localeCompare(a.created_at);
+      })
+      .map((p) => serializeTopicPermission(db, p));
+    res.json({
+      records,
+      pending_count: records.filter((r) => r.status === 'pending').length,
+      total_count: records.length,
+    });
+  });
+
+  app.post('/api/v1/permissions/:id/approve', requireEducator, (req: AuthedRequest, res: Response) => {
+    const record = db.topicPermissions.find((p) => p.id === Number(req.params.id));
+    if (!record) {
+      res.status(404).json({ detail: 'So‘rov topilmadi.' });
+      return;
+    }
+    record.status = 'approved';
+    record.updated_at = new Date().toISOString();
+    record.reviewed_by = req.currentUser!.username;
+    saveDatabase(db);
+    res.json(serializeTopicPermission(db, record));
+  });
+
+  app.get('/api/v1/users', requireEducator, (_req: AuthedRequest, res: Response) => {
+    const users = [...db.users]
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .map((u) => ({
+        ...sanitizeUser(u),
+        approved_topics: db.topicPermissions.filter(
+          (p) => p.user_id === u.id && p.status === 'approved'
+        ).length,
+      }));
+    res.json({ users, total: users.length });
+  });
+
   // ==================== PRESENTATIONS & SLIDES ====================
-  app.get('/api/v1/presentations/:slug', (req: Request, res: Response) => {
+  app.get('/api/v1/presentations/:slug', (req: AuthedRequest, res: Response) => {
     const pres =
       db.presentations.find((p) => p.lesson_slug === req.params.slug) ||
       db.presentations.find((p) => p.topic_slug === req.params.slug);
     if (!pres) {
       res.status(404).json({ detail: 'Ushbu mavzu yoki dars uchun taqdimot topilmadi.' });
+      return;
+    }
+    const presTopicSlug =
+      pres.topic_slug || db.lessons.find((l) => l.slug === pres.lesson_slug)?.topic_slug || '';
+    if (!canAccessTopic(db, req, presTopicSlug)) {
+      res.status(403).json({ detail: 'Bu taqdimot uchun mavzu ruxsati kerak.' });
       return;
     }
     const sortedSlides = [...pres.slides]
@@ -1581,11 +1770,22 @@ async function startServer() {
     const lessonSlug = String(req.query.lesson || '').trim();
     const topicSlug = String(req.query.topic || '').trim();
     const educator = isEducator(req.currentUser);
+    if (lessonSlug) {
+      const lesson = db.lessons.find((l) => l.slug === lessonSlug);
+      if (!lesson || !canAccessTopic(db, req, lesson.topic_slug)) {
+        res.status(403).json({ detail: 'Bu testlar uchun mavzu ruxsati kerak.' });
+        return;
+      }
+    } else if (topicSlug && !canAccessTopic(db, req, topicSlug)) {
+      res.status(403).json({ detail: 'Bu testlar uchun mavzu ruxsati kerak.' });
+      return;
+    }
     const list = db.tests
       .filter((q) => {
         if (lessonSlug) return q.lesson_slug === lessonSlug;
         if (topicSlug) return q.topic_slug === topicSlug && !q.lesson_slug;
-        return true;
+        const qTopic = q.topic_slug || db.lessons.find((l) => l.slug === q.lesson_slug)?.topic_slug || '';
+        return canAccessTopic(db, req, qTopic);
       })
       .sort((a, b) => a.order - b.order)
       .map((q) =>
@@ -1615,6 +1815,11 @@ async function startServer() {
     const topic = topicSlug ? db.topics.find((t) => t.slug === topicSlug) : null;
     if (!lesson && !topic) {
       res.status(404).json({ detail: 'Dars yoki bo‘lim topilmadi.' });
+      return;
+    }
+    const submitTopicSlug = lesson?.topic_slug || topic?.slug || '';
+    if (!canAccessTopic(db, req, submitTopicSlug)) {
+      res.status(403).json({ detail: 'Bu testlarni topshirish uchun mavzu ruxsati kerak.' });
       return;
     }
 
@@ -1714,6 +1919,10 @@ async function startServer() {
       res.status(404).json({ detail: 'O‘yin topilmadi.' });
       return;
     }
+    if (!canAccessTopic(db, req, game.topic_slug)) {
+      res.status(403).json({ detail: 'Bu o‘yin uchun mavzu ruxsati kerak.' });
+      return;
+    }
     const rawScore = Number(req.body?.score);
     if (!Number.isFinite(rawScore) || rawScore < 0) {
       res.status(400).json({ detail: 'Noto‘g‘ri ball qiymati.' });
@@ -1787,6 +1996,10 @@ async function startServer() {
 
     if (!lesson && !topic) {
       res.status(404).json({ detail: 'Dars yoki bo‘lim topilmadi.' });
+      return;
+    }
+    if (!canAccessTopic(db, req, lesson?.topic_slug || topic!.slug)) {
+      res.status(403).json({ detail: 'Bu mavzu uchun ruxsat olinmagan.' });
       return;
     }
 

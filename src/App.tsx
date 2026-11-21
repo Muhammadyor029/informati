@@ -2,7 +2,10 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import {
   AlertCircle,
   BarChart3,
+  Bell,
   BookOpen,
+  CheckCircle2,
+  Clock,
   FileText,
   Gamepad2,
   Layers,
@@ -28,6 +31,7 @@ import {
   ApiTopicSummary,
   ApiUser,
   LessonType,
+  PermissionStatus,
 } from './lib/api';
 import { LoadingOverlay } from './components/LoadingOverlay';
 import { SparkleAnchor, SparkleButton } from './components/SparkleButton';
@@ -131,6 +135,11 @@ export default function App() {
   const [pendingLesson, setPendingLesson] = useState<ApiLessonSummary | null>(null);
   const [pendingTopic, setPendingTopic] = useState<ApiTopicSummary | null>(null);
   const [pendingGame, setPendingGame] = useState<GameDef | null>(null);
+  const [topicPermissions, setTopicPermissions] = useState<Record<string, PermissionStatus>>({});
+  const [permissionBusy, setPermissionBusy] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('register');
 
   useEffect(() => {
     document.documentElement.classList.toggle('theme-night', isNight);
@@ -148,11 +157,29 @@ export default function App() {
         api.getGames(),
       ]);
       setUser(meRes.user);
-      setIsUnlocked(Boolean(meRes.curriculum_unlocked));
+      setIsUnlocked(
+        Boolean(
+          meRes.curriculum_unlocked ||
+            meRes.user?.role === 'teacher' ||
+            meRes.user?.role === 'admin'
+        )
+      );
+      const perms: Record<string, PermissionStatus> = {};
+      for (const p of meRes.topic_permissions || []) perms[p.topic_slug] = p.status;
+      setTopicPermissions(perms);
       setGrades(gradesRes);
       setTopics(topicsRes);
       setLessons(lessonsRes);
       setGames(gamesRes);
+
+      if (meRes.user && (meRes.user.role === 'teacher' || meRes.user.role === 'admin')) {
+        api
+          .getTopicPermissionRequests()
+          .then((res) => setPendingCount(res.pending_count))
+          .catch(() => {});
+      } else {
+        setPendingCount(0);
+      }
 
       if (meRes.user) {
         api
@@ -280,7 +307,7 @@ export default function App() {
   }, [games, gamesGradeFilter, pvpOnlyFilter]);
 
   const handleOpenLesson = (lesson: ApiLessonSummary) => {
-    if (!isUnlocked) {
+    if (!hasTopicAccess(lesson.topic_slug)) {
       setPendingLesson(lesson);
       setPendingTopic(null);
       setPendingGame(null);
@@ -294,7 +321,7 @@ export default function App() {
   };
 
   const handleOpenTopic = (topic: ApiTopicSummary) => {
-    if (!isUnlocked) {
+    if (!hasTopicAccess(topic.slug)) {
       setPendingTopic(topic);
       setPendingLesson(null);
       setPendingGame(null);
@@ -308,7 +335,7 @@ export default function App() {
   };
 
   const handleOpenCatalogGame = (game: GameDef) => {
-    if (!isUnlocked) {
+    if (!hasTopicAccess(game.topicId)) {
       setPendingGame(game);
       setPendingLesson(null);
       setPendingTopic(null);
@@ -375,6 +402,59 @@ export default function App() {
 
   const isEducator = Boolean(user && (user.role === 'admin' || user.role === 'teacher'));
 
+  const activeLesson = useMemo(
+    () => lessons.find((l) => l.slug === activeLessonSlug) || null,
+    [lessons, activeLessonSlug]
+  );
+  const activeTopic = useMemo(
+    () => topics.find((t) => t.slug === activeTopicSlug) || null,
+    [topics, activeTopicSlug]
+  );
+
+  const hasTopicAccess = useCallback(
+    (topicSlug?: string | null) => {
+      if (!topicSlug) return false;
+      if (isUnlocked) return true;
+      return topicPermissions[topicSlug] === 'approved';
+    },
+    [isUnlocked, topicPermissions]
+  );
+
+  const handleRequestPermission = useCallback(
+    async (topicSlug: string) => {
+      setPermissionError(null);
+      if (!user) {
+        setAuthMode('register');
+        setAuthModalOpen(true);
+        return;
+      }
+      setPermissionBusy(true);
+      try {
+        const res = await api.requestTopicPermission(topicSlug);
+        setTopicPermissions((prev) => ({ ...prev, [topicSlug]: res.status }));
+        setTopics((prev) =>
+          prev.map((t) =>
+            t.slug === topicSlug
+              ? { ...t, permission_status: res.status, locked: res.status !== 'approved' }
+              : t
+          )
+        );
+        setLessons((prev) =>
+          prev.map((l) =>
+            l.topic_slug === topicSlug
+              ? { ...l, permission_status: res.status, locked: res.status !== 'approved' }
+              : l
+          )
+        );
+      } catch (err) {
+        setPermissionError(err instanceof ApiError ? err.message : 'So‘rov yuborilmadi.');
+      } finally {
+        setPermissionBusy(false);
+      }
+    },
+    [user]
+  );
+
   const navItems: Array<{ id: MainSection; label: string; icon: React.ReactNode }> = [
     { id: 'dashboard', label: 'Dashboard', icon: <Layers className="h-3.5 w-3.5" /> },
     { id: 'sinflar', label: 'Sinflar (5–11)', icon: <BookOpen className="h-3.5 w-3.5" /> },
@@ -382,7 +462,17 @@ export default function App() {
     { id: 'natijalar', label: 'Natijalar', icon: <BarChart3 className="h-3.5 w-3.5" /> },
     { id: 'reja', label: 'Yillik Reja', icon: <FileText className="h-3.5 w-3.5" /> },
     ...(isEducator
-      ? [{ id: 'admin' as MainSection, label: 'Admin', icon: <Settings className="h-3.5 w-3.5" /> }]
+      ? [
+          {
+            id: 'admin' as MainSection,
+            label: pendingCount > 0 ? `Admin · ${pendingCount} so‘rov` : 'Admin',
+            icon: pendingCount > 0 ? (
+              <Bell className="h-3.5 w-3.5" />
+            ) : (
+              <Settings className="h-3.5 w-3.5" />
+            ),
+          },
+        ]
       : []),
   ];
 
@@ -508,7 +598,10 @@ export default function App() {
                 variant="secondary"
                 size="sm"
                 withParticles={false}
-                onClick={() => setAuthModalOpen(true)}
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthModalOpen(true);
+                }}
               >
                 <LogIn className="h-3.5 w-3.5 text-[#6366f1]" />
                 <span className="hidden sm:inline">Kirish</span>
@@ -831,7 +924,7 @@ export default function App() {
               {/* ==================== 2. SINFLAR (5–11) BO'LIMI (340 TO'LIQ DARSLAR) ==================== */}
               {section === 'sinflar' && (
                 <div className="space-y-6">
-                  {activeLessonSlug && isUnlocked ? (
+                  {activeLessonSlug && hasTopicAccess(activeLesson?.topic_slug) ? (
                     <LessonDetailView
                       lessonSlug={activeLessonSlug}
                       allGames={games}
@@ -845,7 +938,7 @@ export default function App() {
                       completedGames={completedGames}
                       onGameComplete={handleGameComplete}
                     />
-                  ) : activeTopicSlug && isUnlocked ? (
+                  ) : activeTopicSlug && hasTopicAccess(activeTopic?.slug) ? (
                     <TopicDetailView
                       topicSlug={activeTopicSlug}
                       allGames={games}
@@ -991,34 +1084,52 @@ export default function App() {
                                       <span>· {lesson.term}</span>
                                       <span>· {typeBadge}</span>
                                       <span>· {lesson.hours} soat</span>
-                                      {!isUnlocked && <Lock className="h-3 w-3 text-[var(--accent)]" />}
+                                      {lesson.locked && <Lock className="h-3 w-3 text-[var(--accent)]" />}
                                     </div>
                                     <h3 className="mt-1 truncate text-[15px] font-medium">
-                                      {isUnlocked
-                                        ? lesson.title
-                                        : `${selectedGrade}-sinf · ${lesson.dars} (Qulflangan)`}
+                                      {lesson.locked
+                                        ? `${selectedGrade}-sinf · ${lesson.dars} (Qulflangan)`
+                                        : lesson.title}
                                     </h3>
                                     <div className="mt-1 font-mono-tech text-[10px] text-[var(--dim)]">
-                                      {isUnlocked
-                                        ? `${lesson.topic_title} · taqdimot · ${lesson.test_count || 5} test · ${lesson.practice_count || 3} amaliyot · animatsiyali o‘yin`
-                                        : 'Dars sahifasi, diagramma, taqdimot, 5 test, 3 amaliyot va animatsiyali o‘yinni ochish uchun kod kiriting'}
+                                      {lesson.locked
+                                        ? 'Bu darsni ochish uchun mavzu ruxsati kerak.'
+                                        : `${lesson.topic_title} · taqdimot · ${lesson.test_count || 5} test · ${lesson.practice_count || 3} amaliyot · animatsiyali o‘yin`}
                                     </div>
                                   </div>
 
-                                  <SparkleButton
-                                    variant="primary"
-                                    size="xs"
-                                    showSparkle
-                                    withParticles={false}
-                                    onClick={() => handleOpenLesson(lesson)}
-                                  >
-                                    {isUnlocked ? (
+                                  {lesson.locked ? (
+                                    <SparkleButton
+                                      variant="secondary"
+                                      size="xs"
+                                      showSparkle={lesson.permission_status !== 'pending'}
+                                      withParticles={false}
+                                      disabled={lesson.permission_status === 'pending' || permissionBusy}
+                                      onClick={() => handleRequestPermission(lesson.topic_slug)}
+                                    >
+                                      {lesson.permission_status === 'pending' ? (
+                                        <Clock className="h-3.5 w-3.5" />
+                                      ) : (
+                                        <Lock className="h-3.5 w-3.5 text-[#c4b5fd]" />
+                                      )}
+                                      <span className="uppercase">
+                                        {lesson.permission_status === 'pending'
+                                          ? 'So‘rov yuborilgan'
+                                          : 'Ruxsat so‘rash'}
+                                      </span>
+                                    </SparkleButton>
+                                  ) : (
+                                    <SparkleButton
+                                      variant="primary"
+                                      size="xs"
+                                      showSparkle
+                                      withParticles={false}
+                                      onClick={() => handleOpenLesson(lesson)}
+                                    >
                                       <BookOpen className="h-3.5 w-3.5" />
-                                    ) : (
-                                      <Lock className="h-3.5 w-3.5 text-[#c4b5fd]" />
-                                    )}
-                                    <span className="uppercase">{isUnlocked ? 'Darsga kirish' : 'Ochish'}</span>
-                                  </SparkleButton>
+                                      <span className="uppercase">Darsga kirish</span>
+                                    </SparkleButton>
+                                  )}
                                 </div>
                               );
                             })}
@@ -1040,17 +1151,19 @@ export default function App() {
                                   <span>
                                     {topic.order}-BO‘LIM · {topic.term} · {topic.lesson_range} · {topic.total_hours} soat
                                   </span>
-                                  {!isUnlocked && <Lock className="h-3.5 w-3.5 text-[var(--accent)]" />}
+                                  {topic.locked && <Lock className="h-3.5 w-3.5 text-[var(--accent)]" />}
                                 </div>
                                 <h3 className="mt-2 text-lg font-medium">
-                                  {isUnlocked
-                                    ? topic.title
-                                    : `${selectedGrade}-sinf · ${topic.order}-bo‘lim (Qulflangan)`}
+                                  {topic.locked
+                                    ? `${selectedGrade}-sinf · ${topic.order}-bo‘lim (Qulflangan)`
+                                    : topic.title}
                                 </h3>
                                 <p className="mt-1.5 text-sm text-[var(--dim)]">
-                                  {isUnlocked
-                                    ? topic.short_desc
-                                    : 'Mavzu, taqdimot, animatsiya, 5 ta o‘yin, 10 ta test va 6 ta amaliyotni ochish uchun kod kiriting.'}
+                                  {topic.locked
+                                    ? topic.permission_status === 'pending'
+                                      ? 'Ruxsat so‘rovi domlaga yuborildi. Tasdiqlangach mavzu ochiladi.'
+                                      : 'Bu mavzuni ochish uchun domladan ruxsat so‘rang.'
+                                    : topic.short_desc}
                                 </p>
                               </div>
 
@@ -1059,20 +1172,54 @@ export default function App() {
                                   {topic.lesson_count} dars · taqdimot · {topic.test_count || 10} test ·{' '}
                                   {topic.practice_count || 6} amaliyot · {(topic.game_ids || []).length || 5} o‘yin
                                 </span>
-                                <SparkleButton
-                                  variant="primary"
-                                  size="sm"
-                                  showSparkle
-                                  withParticles
-                                  onClick={() => handleOpenTopic(topic)}
-                                >
-                                  {isUnlocked ? (
+                                {topic.locked ? (
+                                  <div className="flex flex-wrap justify-end gap-2">
+                                    <SparkleButton
+                                      variant="secondary"
+                                      size="sm"
+                                      showSparkle={topic.permission_status !== 'pending'}
+                                      withParticles={false}
+                                      disabled={topic.permission_status === 'pending' || permissionBusy}
+                                      onClick={() => handleRequestPermission(topic.slug)}
+                                    >
+                                      {topic.permission_status === 'pending' ? (
+                                        <Clock className="h-3.5 w-3.5" />
+                                      ) : (
+                                        <Lock className="h-3.5 w-3.5 text-[#c4b5fd]" />
+                                      )}
+                                      <span className="uppercase">
+                                        {topic.permission_status === 'pending'
+                                          ? 'So‘rov yuborilgan'
+                                          : 'Ruxsat so‘rash'}
+                                      </span>
+                                    </SparkleButton>
+                                    <SparkleButton
+                                      variant="subtle"
+                                      size="sm"
+                                      withParticles={false}
+                                      onClick={() => {
+                                        setPendingTopic(topic);
+                                        setPendingLesson(null);
+                                        setPendingGame(null);
+                                        setPermissionError(null);
+                                        setLockModalOpen(true);
+                                      }}
+                                    >
+                                      <span className="uppercase">Kod kiritish</span>
+                                    </SparkleButton>
+                                  </div>
+                                ) : (
+                                  <SparkleButton
+                                    variant="primary"
+                                    size="sm"
+                                    showSparkle
+                                    withParticles
+                                    onClick={() => handleOpenTopic(topic)}
+                                  >
                                     <BookOpen className="h-3.5 w-3.5" />
-                                  ) : (
-                                    <Lock className="h-3.5 w-3.5 text-[#c4b5fd]" />
-                                  )}
-                                  <span className="uppercase">{isUnlocked ? 'Ochish' : 'Kod kiritish'}</span>
-                                </SparkleButton>
+                                    <span className="uppercase">Ochish</span>
+                                  </SparkleButton>
+                                )}
                               </div>
                             </div>
                           ))}
@@ -1086,7 +1233,7 @@ export default function App() {
               {/* ==================== 3. O'YINLAR VA OMAD G'ILDIRAGI BO'LIMI ==================== */}
               {section === 'oyinlar' && (
                 <div className="space-y-6">
-                  {activeCatalogGame && isUnlocked ? (
+                  {activeCatalogGame && hasTopicAccess(activeCatalogGame.topicId) ? (
                     <GameArena
                       key={activeCatalogGame.id}
                       game={activeCatalogGame}
@@ -1098,7 +1245,9 @@ export default function App() {
                       <Suspense fallback={<SectionSpinner />}>
                         <FortuneWheel
                           games={games}
-                          isUnlocked={isUnlocked}
+                          isUnlocked={
+                            isUnlocked || Object.values(topicPermissions).includes('approved')
+                          }
                           onSelectGame={handleOpenCatalogGame}
                         />
                       </Suspense>
@@ -1164,6 +1313,7 @@ export default function App() {
                         {filteredGames.map((g) => {
                           const best = completedGames[g.id];
                           const hasPvp = supportsPvpEngine(g.engine);
+                          const gameOpen = hasTopicAccess(g.topicId);
                           return (
                             <div
                               key={g.id}
@@ -1183,33 +1333,56 @@ export default function App() {
                                     )}
                                     {best !== undefined ? (
                                       <span className="text-emerald-500">{best} BALL</span>
-                                    ) : !isUnlocked ? (
+                                    ) : !gameOpen ? (
                                       <Lock className="h-3 w-3 text-[var(--accent)]" />
                                     ) : null}
                                   </div>
                                 </div>
                                 <h3 className="mt-1.5 text-base font-medium">
-                                  {isUnlocked ? g.title : `O‘yin #${g.id} (${g.grade}-sinf · Qulflangan)`}
+                                  {gameOpen ? g.title : `O‘yin #${g.id} (${g.grade}-sinf · Qulflangan)`}
                                 </h3>
                                 <p className="mt-1 text-sm text-[var(--dim)]">
-                                  {isUnlocked
+                                  {gameOpen
                                     ? g.idea
-                                    : 'O‘yin g‘oyasi va shartlarini ochish uchun maxfiy kodni kiriting.'}
+                                    : 'Bu o‘yinni ochish uchun tegishli mavzu ruxsati kerak.'}
                                 </p>
                               </div>
 
                               <div className="mt-4">
-                                <SparkleButton
-                                  variant="primary"
-                                  size="sm"
-                                  fullWidth
-                                  showSparkle
-                                  withParticles={false}
-                                  onClick={() => handleOpenCatalogGame(g)}
-                                >
-                                  {isUnlocked ? <Play className="h-3.5 w-3.5" /> : <Lock className="h-3.5 w-3.5" />}
-                                  <span className="uppercase">{isUnlocked ? 'O‘ynash' : 'Qulfni ochib o‘ynash'}</span>
-                                </SparkleButton>
+                                {gameOpen ? (
+                                  <SparkleButton
+                                    variant="primary"
+                                    size="sm"
+                                    fullWidth
+                                    showSparkle
+                                    withParticles={false}
+                                    onClick={() => handleOpenCatalogGame(g)}
+                                  >
+                                    <Play className="h-3.5 w-3.5" />
+                                    <span className="uppercase">O‘ynash</span>
+                                  </SparkleButton>
+                                ) : (
+                                  <SparkleButton
+                                    variant="secondary"
+                                    size="sm"
+                                    fullWidth
+                                    showSparkle={topicPermissions[g.topicId] !== 'pending'}
+                                    withParticles={false}
+                                    disabled={topicPermissions[g.topicId] === 'pending' || permissionBusy}
+                                    onClick={() => handleRequestPermission(g.topicId)}
+                                  >
+                                    {topicPermissions[g.topicId] === 'pending' ? (
+                                      <Clock className="h-3.5 w-3.5" />
+                                    ) : (
+                                      <Lock className="h-3.5 w-3.5" />
+                                    )}
+                                    <span className="uppercase">
+                                      {topicPermissions[g.topicId] === 'pending'
+                                        ? 'So‘rov yuborilgan'
+                                        : 'Ruxsat so‘rash'}
+                                    </span>
+                                  </SparkleButton>
+                                )}
                               </div>
                             </div>
                           );
@@ -1227,10 +1400,13 @@ export default function App() {
                   grades={grades}
                   localCompletedGames={completedGames}
                   totalGames={games.length || 59}
-                  onOpenAuth={() => setAuthModalOpen(true)}
+                  onOpenAuth={() => {
+                    setAuthMode('login');
+                    setAuthModalOpen(true);
+                  }}
                   onOpenTopicSlug={(slug, grade) => {
                     setSelectedGrade(grade as GradeId);
-                    if (!isUnlocked) {
+                    if (!hasTopicAccess(slug)) {
                       const target = topics.find((t) => t.slug === slug) || null;
                       setPendingTopic(target);
                       setLockModalOpen(true);
@@ -1242,8 +1418,8 @@ export default function App() {
                   }}
                   onOpenLessonSlug={(slug, grade) => {
                     setSelectedGrade(grade as GradeId);
-                    if (!isUnlocked) {
-                      const target = lessons.find((l) => l.slug === slug) || null;
+                    const target = lessons.find((l) => l.slug === slug) || null;
+                    if (!hasTopicAccess(target?.topic_slug)) {
                       setPendingLesson(target);
                       setLockModalOpen(true);
                       return;
@@ -1322,7 +1498,10 @@ export default function App() {
                   user={user}
                   grades={grades}
                   topics={topics}
-                  onOpenAuth={() => setAuthModalOpen(true)}
+                  onOpenAuth={() => {
+                    setAuthMode('login');
+                    setAuthModalOpen(true);
+                  }}
                   onDataUpdated={loadCurriculumData}
                 />
               )}
@@ -1341,6 +1520,7 @@ export default function App() {
               setPendingLesson(null);
               setPendingTopic(null);
               setPendingGame(null);
+              setPermissionError(null);
             }}
             onUnlockSuccess={handleUnlockSuccess}
             targetTitle={
@@ -1352,6 +1532,28 @@ export default function App() {
                 ? `${pendingGame.grade}-sinf · O‘yin #${pendingGame.id}`
                 : undefined
             }
+            topicSlug={
+              pendingTopic?.slug || pendingLesson?.topic_slug || pendingGame?.topicId || null
+            }
+            permissionStatus={
+              (pendingTopic?.slug || pendingLesson?.topic_slug || pendingGame?.topicId
+                ? topicPermissions[
+                    (pendingTopic?.slug || pendingLesson?.topic_slug || pendingGame?.topicId) as string
+                  ]
+                : null) ||
+              pendingTopic?.permission_status ||
+              pendingLesson?.permission_status ||
+              null
+            }
+            isLoggedIn={Boolean(user)}
+            requesting={permissionBusy}
+            permissionError={permissionError}
+            onRequestPermission={handleRequestPermission}
+            onRequireLogin={() => {
+              setAuthMode('register');
+              setLockModalOpen(false);
+              setAuthModalOpen(true);
+            }}
           />
         </Suspense>
       )}
@@ -1361,6 +1563,7 @@ export default function App() {
         <Suspense fallback={null}>
           <AuthModal
             isOpen={authModalOpen}
+            initialMode={authMode}
             onClose={() => setAuthModalOpen(false)}
             onAuthSuccess={(u) => {
               setUser(u);
