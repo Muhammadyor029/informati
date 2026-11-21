@@ -20,6 +20,8 @@ const SEED_PATH = path.resolve(__dirname, 'backend', 'fixtures', 'seed_curriculu
 const SESSION_COOKIE = 'nova_session';
 const UNLOCK_COOKIE = 'nova_unlock';
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const TEACHER_USERNAME = (process.env.TEACHER_USERNAME || 'SamandarTurdaliyev').trim();
+const TEACHER_PASSWORD = process.env.TEACHER_PASSWORD || 'Samandar123';
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024; // 15 MB
 
 const ALLOWED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
@@ -859,21 +861,30 @@ function loadDatabase(): DatabaseSchema {
     });
   }
 
-  const teacherUsername = (process.env.TEACHER_USERNAME || 'SamandarTurdaliyev').trim();
-  const teacherPassword = process.env.TEACHER_PASSWORD || 'Samandar123';
-  if (teacherUsername && teacherPassword && !db.users.some((u) => u.username === teacherUsername)) {
-    db.users.push({
-      id: db.nextIds.user++,
-      username: teacherUsername,
-      email: `${teacherUsername}@novainformatika.uz`,
-      first_name: 'Samandar',
-      last_name: 'Turdaliyev',
-      role: 'teacher',
-      grade_level: 7,
-      curriculum_unlocked: true,
-      password_hash: hashPassword(teacherPassword),
-      created_at: new Date().toISOString(),
-    });
+  if (TEACHER_USERNAME && TEACHER_PASSWORD) {
+    const existingTeacher = db.users.find((u) => u.username === TEACHER_USERNAME);
+    if (existingTeacher) {
+      existingTeacher.role = 'teacher';
+      existingTeacher.email = `${TEACHER_USERNAME}@novainformatika.uz`;
+      existingTeacher.first_name = 'Samandar';
+      existingTeacher.last_name = 'Turdaliyev';
+      existingTeacher.grade_level = 7;
+      existingTeacher.curriculum_unlocked = true;
+      existingTeacher.password_hash = hashPassword(TEACHER_PASSWORD);
+    } else {
+      db.users.push({
+        id: db.nextIds.user++,
+        username: TEACHER_USERNAME,
+        email: `${TEACHER_USERNAME}@novainformatika.uz`,
+        first_name: 'Samandar',
+        last_name: 'Turdaliyev',
+        role: 'teacher',
+        grade_level: 7,
+        curriculum_unlocked: true,
+        password_hash: hashPassword(TEACHER_PASSWORD),
+        created_at: new Date().toISOString(),
+      });
+    }
   }
 
   saveDatabase(db);
@@ -1088,6 +1099,10 @@ async function startServer() {
     }
     if (password.length < 6) {
       res.status(400).json({ detail: 'Parol kamida 6 ta belgidan iborat bo‘lishi kerak.' });
+      return;
+    }
+    if (TEACHER_USERNAME && username.toLowerCase() === TEACHER_USERNAME.toLowerCase()) {
+      res.status(403).json({ detail: 'Bu login o‘qituvchi hisobi uchun ajratilgan.' });
       return;
     }
     if (db.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
